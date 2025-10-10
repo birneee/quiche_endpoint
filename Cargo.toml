@@ -1,0 +1,28 @@
+[package]
+name = "quiche_endpoint"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+# Enable quiche's fuzzing mode.
+fuzzing = ["quiche/fuzzing"]
+
+# Enable qlog support.
+qlog = ["quiche/qlog"]
+
+# Use boring crate.
+boringssl-boring-crate = ["quiche/boringssl-boring-crate"]
+
+default = ["qlog", "quiche/boringssl-boring-crate"]
+
+[dependencies]
+quiche = "0.24.6"
+log = "0.4.22"
+ring = "0.17.8"
+slab = "0.4"
+rustc-hash = "2.1.1"
+smallvec = "2.0.0-alpha.11"
+
+[dev-dependencies]
+env_logger = "0.11.8"
+boring = "4.19.0"
