@@ -16,7 +16,7 @@ boringssl-boring-crate = ["quiche/boringssl-boring-crate"]
 default = ["qlog", "quiche/boringssl-boring-crate"]
 
 [dependencies]
-quiche = "0.24.6"
+quiche = "0.24"
 log = "0.4.22"
 ring = "0.17.8"
 slab = "0.4"
