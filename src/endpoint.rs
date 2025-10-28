@@ -366,8 +366,10 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
                             None => {
                                 trace!("{}: done writing", quic_conn.trace_id());
                                 self.current_send_conn += 1; // next conn
-                                conn.pending_send = false;
-                                self.pending_send_conns -= 1;
+                                if conn.pending_send {
+                                    conn.pending_send = false;
+                                    self.pending_send_conns -= 1;
+                                }
                                 debug_assert_eq!(total_write, 0);
                                 continue 'conn;
                             }
@@ -625,6 +627,21 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
     pub fn app_data_mut(&mut self) -> &mut TAppData {
         &mut self.app_data
     }
+
+    /// Silently remove connection from endpoint.
+    /// No close and no more other packets are sent for this connections.
+    pub fn remove_conn(&mut self, cid: ClientId) {
+        let conn = self.conns.remove(cid);
+
+        for id in conn.conn.source_ids() {
+            let id_owned = id.clone().into_owned();
+            self.conn_ids.remove(&id_owned);
+        }
+
+        if conn.pending_send {
+            self.pending_send_conns -= 1;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -794,5 +811,21 @@ mod tests {
         assert_eq!(p.client.num_conns(), 1);
         p.client.collect_garbage();
         assert_eq!(p.client.num_conns(), 0);
+    }
+
+    #[test]
+    fn pending_sends() {
+        let _ = env_logger::try_init();
+        let mut p = Pipe::new();
+        let cid = p.connect();
+        p.handshake_all().unwrap();
+        p.advance();
+        assert!(!p.client.has_pending_sends());
+        p.client.conn(cid).unwrap();
+        assert!(!p.client.has_pending_sends());
+        p.client.conn_mut(cid).unwrap();
+        assert!(p.client.has_pending_sends());
+        p.advance();
+        assert!(!p.client.has_pending_sends());
     }
 }
