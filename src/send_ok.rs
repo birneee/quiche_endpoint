@@ -1,6 +1,7 @@
 use crate::ClientId;
 use quiche::SendInfo;
 
+#[derive(Debug)]
 pub struct SendOk {
     pub total: usize,
     pub segment_size: usize,

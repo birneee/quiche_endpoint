@@ -331,7 +331,7 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
 
         let ok = 'conn: loop {
             if !self.has_pending_sends() {
-                return Err(Error::Quiche(quiche::Error::Done));
+                return Err(Error::Done);
             }
             let conn = match self.conns.get_mut(self.current_send_conn) {
                 None => {
@@ -357,8 +357,10 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
                 quic_conn.send_quantum()
             };
             let max_send_burst = quantum.min(out.len()) / max_datagram_size * max_datagram_size;
+            assert!(out.len() >= max_send_burst);
 
             'packet: loop {
+                debug_assert!(max_send_burst-total_write>=max_datagram_size);
                 let (write, mut send_info) = match quic_conn.send_on_path(&mut out[total_write..max_send_burst], None, self.current_dst_addr) {
                     Ok(v) => v,
                     Err(quiche::Error::Done) => {
@@ -391,6 +393,7 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
                         continue 'conn;
                     }
                 };
+                debug_assert_ne!(write, 0);
                 match self.current_dst_addr {
                     None => {
                         self.current_dst_addr = Some(send_info.to);
@@ -642,16 +645,21 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
             self.pending_send_conns -= 1;
         }
     }
+
+    pub fn take_app_data(self) -> TAppData {
+        self.app_data
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::endpoint::RecvResult;
     use crate::server_config::RetryConfig;
-    use crate::test_utils::{key_pair, server_config, to_recv_info, Pipe};
-    use crate::ClientId;
+    use crate::test_utils::{to_recv_info, Pipe};
+    use crate::{ClientId, Error};
     use quiche::{ConnectionId, Header, Type};
     use std::net::{SocketAddr, SocketAddrV4};
+    use crate::send_ok::SendOk;
 
     #[test]
     fn version_negotiation() {
@@ -711,7 +719,7 @@ mod tests {
         let mut buf = [0u8; 1 << 16];
         let mut p = Pipe::new();
         let addrs: Vec<SocketAddr> = (0..NUM_CONNS).map(|i| SocketAddr::V4(SocketAddrV4::new("127.0.0.1".parse().unwrap(), (9000 + i) as u16))).collect();
-        let cids: Vec<ClientId> = addrs.as_slice().iter().map(|a| p.connect_with(*a)).collect();
+        let cids: Vec<ClientId> = addrs.as_slice().iter().map(|a| p.connect_with(Some(*a), None)).collect();
         p.handshake_all().unwrap();
         for _ in 0..NUM_ROUNDS {
             p.advance(); // until nothing is to be sent
@@ -777,16 +785,12 @@ mod tests {
     #[test]
     fn retry() {
         let _ = env_logger::try_init();
-        let (key, cert) = key_pair();
-        let server_config = {
-            let mut c = server_config(key, cert);
+        let mut p = Pipe::with(Some(|c| {
             c.retry = Some(RetryConfig {
                 mint_token: |hdr, _addr| { hdr.dcid.to_vec() },
                 validate_token: |_addr, token| { Some(ConnectionId::from_ref(&token)) },
             });
-            c
-        };
-        let mut p = Pipe::with_server_config(server_config, cert);
+        }));
         p.connect();
         Pipe::transfer(&mut p.client, &mut p.server).unwrap();
         let mut buf = [0u8; 1 << 16];
@@ -826,6 +830,40 @@ mod tests {
         p.client.conn_mut(cid).unwrap();
         assert!(p.client.has_pending_sends());
         p.advance();
+        assert!(!p.client.has_pending_sends());
+    }
+
+    #[test]
+    fn send_bursts() {
+        let _ = env_logger::try_init();
+        let mut p = Pipe::with(Some(|c| {
+            c.client_config.set_initial_max_data(1_000_000);
+            c.client_config.set_initial_max_stream_data_bidi_remote(1_000_000);
+        }));
+        const NUM_CONNS: usize = 3;
+        let addrs: Vec<SocketAddr> = (0..NUM_CONNS).map(|i| SocketAddr::V4(SocketAddrV4::new("127.0.0.1".parse().unwrap(), (9000 + i) as u16))).collect();
+        let mut client_config = {
+            let mut c = p.default_client_config();
+            c.set_initial_congestion_window_packets(100);
+            c
+        };
+        let _cids: Vec<ClientId> = addrs.as_slice().iter().map(|a| p.connect_with(Some(*a), Some(&mut client_config))).collect();
+        p.handshake_all().unwrap();
+        let mut buf = [0u8; 1_000_000];
+        const STREAM_DATA: usize = 100_000;
+        for i in p.client.conn_index_iter() {
+            let Some(conn) = p.client.conn_mut(i) else { continue };
+            let n = conn.conn.stream_send(0, &buf[..STREAM_DATA], false).unwrap();
+            assert_eq!(n, STREAM_DATA);
+        }
+        assert!(p.client.has_pending_sends());
+        assert!(matches!(p.client.send_packets_out(&mut buf), Ok(SendOk{client_id: Some(0), ..})));
+        assert!(p.client.has_pending_sends());
+        assert!(matches!(p.client.send_packets_out(&mut buf), Ok(SendOk{client_id: Some(1), ..})));
+        assert!(p.client.has_pending_sends());
+        assert!(matches!(p.client.send_packets_out(&mut buf), Ok(SendOk{client_id: Some(2), ..})));
+        assert!(p.client.has_pending_sends());
+        assert!(matches!(p.client.send_packets_out(&mut buf), Err(Error::Done)));
         assert!(!p.client.has_pending_sends());
     }
 }

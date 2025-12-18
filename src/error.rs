@@ -7,20 +7,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     CloseByUser,
     IO(io::Error),
-    Quiche(quiche::Error),
     UnknownConnID,
     InvalidConnID,
     InvalidAddrToken,
     QuicheRecvFailed(quiche::Error),
     InvalidHeader(quiche::Error),
+    Done
 }
-
-impl From<quiche::Error> for Error {
-    fn from(e: quiche::Error) -> Self {
-        Error::Quiche(e)
-    }
-}
-
 
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Self {
