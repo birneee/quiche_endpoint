@@ -47,6 +47,8 @@
             rustfmt
             rust-analyzer
             rust-toolchain
+            cmake
+            clang
           ];
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
