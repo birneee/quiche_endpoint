@@ -50,7 +50,7 @@ pub fn to_recv_info(si: SendInfo) -> RecvInfo {
     }
 }
 
-pub fn server_config(key: &PKey<Private>, cert: &'static X509) -> ServerConfig {
+pub fn default_server_config(key: &PKey<Private>, cert: &'static X509) -> ServerConfig {
     {
         let mut c = ServerConfig::default();
         c.client_config = {
@@ -68,10 +68,34 @@ pub fn server_config(key: &PKey<Private>, cert: &'static X509) -> ServerConfig {
             c.set_initial_max_stream_data_bidi_local(10_000);
             c.set_initial_max_stream_data_bidi_remote(10_000);
             c.set_active_connection_id_limit(5);
+            c.set_max_idle_timeout(1000);
             c
         };
         c
     }
+}
+
+pub fn default_client_config(cert: &'static X509) -> Config {
+    let mut c = Config::with_boring_ssl_ctx_builder(PROTOCOL_VERSION, {
+        let mut b = SslContextBuilder::new(SslMethod::tls()).unwrap();
+        b.set_cert_store_builder({
+            let mut b = X509StoreBuilder::new().unwrap();
+            b.add_cert(cert.clone()).unwrap();
+            b
+        });
+        b
+    }).unwrap();
+    c.set_application_protos(&[b"proto1"]).unwrap();
+    c.set_initial_max_streams_bidi(1);
+    c.set_initial_max_stream_data_uni(1);
+    c.set_initial_max_data(10_000);
+    c.set_initial_max_stream_data_uni(10_000);
+    c.set_initial_max_stream_data_bidi_local(10_000);
+    c.set_initial_max_stream_data_bidi_remote(10_000);
+    c.verify_peer(true);
+    c.set_active_connection_id_limit(5);
+    c.set_max_idle_timeout(1000);
+    c
 }
 
 /// similar to `quiche::testing::Pipe` but for Endpoints
@@ -91,7 +115,7 @@ impl Pipe {
 
     pub fn with(config_server: Option<fn(&mut ServerConfig)>) -> Self {
         let (key, cert) = key_pair();
-        let mut server_config = server_config(key, cert);
+        let mut server_config = default_server_config(key, cert);
         if let Some(config_server) = config_server {
             config_server(&mut server_config)
         }
@@ -111,28 +135,6 @@ impl Pipe {
         )
     }
 
-    pub fn default_client_config(&self) -> Config {
-        let mut c = Config::with_boring_ssl_ctx_builder(PROTOCOL_VERSION, {
-            let mut b = SslContextBuilder::new(SslMethod::tls()).unwrap();
-            b.set_cert_store_builder({
-                let mut b = X509StoreBuilder::new().unwrap();
-                b.add_cert(self.cert.clone()).unwrap();
-                b
-            });
-            b
-        }).unwrap();
-        c.set_application_protos(&[b"proto1"]).unwrap();
-        c.set_initial_max_streams_bidi(1);
-        c.set_initial_max_stream_data_uni(1);
-        c.set_initial_max_data(10_000);
-        c.set_initial_max_stream_data_uni(10_000);
-        c.set_initial_max_stream_data_bidi_local(10_000);
-        c.set_initial_max_stream_data_bidi_remote(10_000);
-        c.verify_peer(true);
-        c.set_active_connection_id_limit(5);
-        c
-    }
-
     /// create a new connection on the client endpoint.
     /// this function does not generate outgoing packets.
     ///
@@ -140,7 +142,7 @@ impl Pipe {
     /// * `client_config` - None to use default config
     pub fn connect_with(&mut self, peer_addr: Option<SocketAddr>, client_config: Option<&mut Config>) -> ClientId {
         let peer_addr = peer_addr.unwrap_or("127.0.0.1:9000".parse().unwrap());
-        let mut default_client_config = self.default_client_config();
+        let mut default_client_config = default_client_config(self.cert);
         let mut client_config = client_config.unwrap_or(&mut default_client_config);
 
         self.client.connect(
@@ -206,5 +208,9 @@ impl Pipe {
             Self::transfer(&mut self.server, &mut self.client)?;
         }
         Ok(())
+    }
+
+    pub fn take(self) -> (Endpoint, Endpoint) {
+        (self.client, self.server)
     }
 }

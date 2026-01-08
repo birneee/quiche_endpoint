@@ -6,9 +6,10 @@ mod error;
 mod packet_queue;
 mod server_config;
 mod conn;
-#[cfg(test)]
-mod test_utils;
+#[doc(hidden)]
+pub mod test_utils;
 mod send_ok;
+mod tests;
 
 pub use endpoint::Endpoint;
 pub use endpoint_config::EndpointConfig;
@@ -42,17 +43,12 @@ pub type ConnMap<TConnAppData> = Slab<Conn<TConnAppData>>;
 
 pub type ClientIdMap = FxHashMap<ConnectionId<'static>, ClientId>;
 
-type OnRecvUdpFunc = fn(&[u8]);
-type OnRecvQuicFunc<TConnAppData, TAppData> = fn(&mut Conn<TConnAppData>, &mut TAppData);
-type OnCloseFunc<TConnAppData, TAppData> = fn(&Conn<TConnAppData>, &mut TAppData);
-
-
-
-// Handle path events.
+/// Handle path events.
+/// return true if migrated.
 fn handle_path_events(
     conn: &mut Connection,
-    on_migrate: fn(),
-) {
+) -> bool {
+    let mut migrated = false;
     while let Some(qe) = conn.path_event_next() {
         match qe {
             quiche::PathEvent::New(local_addr, peer_addr) => {
@@ -83,7 +79,7 @@ fn handle_path_events(
                 //TODO check if this is a good default
                 if !conn.is_server() {
                     conn.migrate(local_addr, peer_addr).unwrap();
-                    on_migrate();
+                    migrated = true;
                 }
             }
 
@@ -128,6 +124,7 @@ fn handle_path_events(
             }
         }
     }
+    migrated
 }
 
 /// Generate a new pair of Source Connection ID and reset token.

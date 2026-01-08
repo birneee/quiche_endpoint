@@ -22,10 +22,10 @@ ring = "0.17"
 slab = "0.4"
 rustc-hash = "2.1"
 smallvec = "2.0.0-alpha.11"
+boring = "4"
 
 [dev-dependencies]
 env_logger = "0.11"
-boring = "4.19"
 
 [lib]
 crate-type = ["rlib", "staticlib", "cdylib"]
