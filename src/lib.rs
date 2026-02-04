@@ -1,5 +1,13 @@
 #![warn(unused_crate_dependencies)]
 #![warn(unused_extern_crates)]
+
+#[cfg(test)]
+mod benches {
+    // this tells unused_crate_dependencies the crates are used
+    use criterion as _;
+    use pprof as _;
+}
+
 mod endpoint;
 mod endpoint_config;
 mod error;
@@ -8,7 +16,6 @@ mod server_config;
 mod conn;
 #[doc(hidden)]
 pub mod test_utils;
-mod send_ok;
 mod tests;
 
 pub use endpoint::Endpoint;
@@ -20,7 +27,7 @@ pub use quiche;
 pub use server_config::ServerConfig;
 
 pub use crate::conn::Conn;
-use log::{error, info, warn};
+use log::{error, info};
 use quiche::{Connection, ConnectionId};
 use ring::rand::SecureRandom;
 use rustc_hash::FxHashMap;

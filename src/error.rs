@@ -12,12 +12,19 @@ pub enum Error {
     InvalidAddrToken,
     QuicheRecvFailed(quiche::Error),
     InvalidHeader(quiche::Error),
+    Quiche(quiche::Error),
     Done
 }
 
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Self {
         Error::IO(e)
+    }
+}
+
+impl From<quiche::Error> for Error {
+    fn from(e: quiche::Error) -> Self {
+        Error::Quiche(e)
     }
 }
 
@@ -30,6 +37,10 @@ impl Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::IO(e) => Some(e),
+            Self::QuicheRecvFailed(e) => Some(e),
+            Self::InvalidHeader(e) => Some(e),
+            Self::Quiche(e) => Some(e),
             _ => None
         }
     }

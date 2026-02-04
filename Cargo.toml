@@ -26,6 +26,15 @@ boring = "4"
 
 [dev-dependencies]
 env_logger = "0.11"
+criterion = { version = "0.5", features = ["html_reports"] }
+pprof = { version = "0.15.0", features = ["flamegraph", "criterion"] }
 
 [lib]
 crate-type = ["rlib", "staticlib", "cdylib"]
+
+[[bench]]
+name = "main"
+harness = false
+
+[profile.bench]
+debug = true

@@ -9,9 +9,13 @@ pub struct Conn<TConnAppData> {
     pub client_id: ClientId,
     pub conn: Connection,
     pub app_data: TConnAppData,
-    /// Tracks if the connection might send packets.
-    /// The application should not wait for a timeout as long as packets are pending.
-    pub(crate) pending_send: bool,
+    pub max_datagram_size: usize,
+    pub loss_rate: f64,
+    pub max_send_burst: usize,
+    /// remember if early_data setup is done
+    pub setup_early_data: bool,
+    /// remember if established setup is done
+    pub setup_established: bool,
 }
 
 impl<TConnAppData: fmt::Debug> fmt::Debug for Conn<TConnAppData> {

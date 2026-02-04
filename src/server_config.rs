@@ -56,3 +56,10 @@ impl<TAppData> Default for ServerConfig<TAppData> where TAppData: Default {
         }
     }
 }
+
+impl <T> ServerConfig<T> {
+    /// reset pending packets
+    pub(crate) fn reset(&mut self) {
+        self.packet_queue.clear();
+    }
+}

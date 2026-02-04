@@ -44,8 +44,8 @@ impl PacketQueue {
         self.buffers.push_back(buf);
     }
 
-    /// Number of packets
-    pub(crate) fn packet_count(&self) -> usize {
-        self.packets.len()
+    /// Clears the deque, removing all values.
+    pub(crate) fn clear(&mut self) {
+        self.packets.clear();
     }
 }

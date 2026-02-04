@@ -1,7 +1,6 @@
 use crate::endpoint_config::EndpointConfig;
 use crate::error::Error;
 use crate::error::Error::{InvalidHeader, QuicheRecvFailed};
-use crate::send_ok::SendOk;
 use crate::{generate_cid_and_reset_token, handle_path_events, server_config, setup_qlog, ClientId, ClientIdMap, Conn, ConnMap, Result, INSTANT_ZERO, MAX_UDP_PAYLOAD};
 use log::{debug, error, trace, warn};
 use quiche::{ConnectionId, Header, RecvInfo, SendInfo};
@@ -27,15 +26,7 @@ pub struct Endpoint<TConnAppData = (), TAppData = ()> {
     conns: ConnMap<TConnAppData>,
     rng: SystemRandom,
     app_data: TAppData,
-    /// Number of connections that might have something to send.
-    /// Number of connections hat have the field `pending_send` set.
-    pending_send_conns: usize,
-    /// The `ClientId` of QUIC connection to generate the next outgoing packet
-    current_send_conn: usize,
-    /// The destination addr to generate the next outgoing packet for.
-    /// Must be reset to `None` if `current_send_conn` changes or all packets are sent on this path,
-    /// and it should be continued with the next one.
-    current_dst_addr: Option<SocketAddr>,
+    continue_write: bool,
 }
 
 /// Endpoint is an entity that can participate in a QUIC connection by
@@ -54,13 +45,12 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
             conns: Default::default(),
             rng: SystemRandom::new(),
             app_data,
-            pending_send_conns: 0,
-            current_send_conn: 0,
-            current_dst_addr: None,
+            continue_write: false,
         }
     }
 
     /// create new client connection
+    #[allow(clippy::too_many_arguments)]
     pub fn connect(
         &mut self,
         server_name: Option<&str>,
@@ -101,23 +91,26 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
         #[cfg(feature = "qlog")]
         setup_qlog(&mut conn, "client", &scid);
 
-        if let Some(session_file) = session_file {
-            if let Ok(session) = std::fs::read(session_file) {
-                conn.set_session(&session).ok();
-            }
+        if let Some(session_file) = session_file && let Ok(session) = std::fs::read(session_file) {
+            conn.set_session(&session).ok();
         }
 
         let client_id = self.conns.vacant_key();
+        let max_datagram_size = conn.max_send_udp_payload_size();
         self.conns.insert(Conn {
             client_id,
             conn,
             app_data: conn_app_data,
-            pending_send: true,
+            max_datagram_size,
+            loss_rate: 0.0,
+            max_send_burst: MAX_UDP_PAYLOAD,
+            setup_early_data: false,
+            setup_established: false,
         });
 
         self.conn_ids.insert(scid.into_owned(), client_id);
 
-        self.pending_send_conns += 1; // should send initial packet immediately, connection timeout is None initially
+        self.continue_write = true; // should send initial packet immediately, connection timeout is None initially
         client_id
     }
 
@@ -126,7 +119,7 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
         let mut results = SmallVec::new();
         for segment in buf.chunks_mut(segment_size) {
             let r = self.recv(segment, ri);
-            let _ = results.push(r);
+            results.push(r);
         }
         results
     }
@@ -148,7 +141,7 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
         let hdr = quiche::Header::from_slice(
             pkt_buf,
             quiche::MAX_CONN_ID_LEN,
-        ).map_err(|e| InvalidHeader(e))?;
+        ).map_err(InvalidHeader)?;
 
         trace!("got packet {:?}", hdr);
 
@@ -232,13 +225,18 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
                 let app_data = (server.on_accept)(&conn);
 
                 let client_id = self.conns.vacant_key();
+                let max_datagram_size = conn.max_send_udp_payload_size();
                 self.conns.insert(Conn {
                     client_id,
                     conn,
                     app_data,
-                    pending_send: true,
+                    max_datagram_size,
+                    loss_rate: 0.0,
+                    max_send_burst: MAX_UDP_PAYLOAD,
+                    setup_early_data: false,
+                    setup_established: false,
                 });
-                self.pending_send_conns += 1;
+                self.continue_write = true;
                 self.conn_ids.insert(scid.clone().into_owned(), client_id);
                 new_connection = true;
                 (client_id, self.conns.get_mut(client_id).unwrap())
@@ -260,11 +258,8 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
         };
 
         // Process potentially coalesced packets.
-        let read = conn.conn.recv(pkt_buf, info).map_err(|e| QuicheRecvFailed(e))?;
-        if !conn.pending_send {
-            conn.pending_send = true;
-            self.pending_send_conns += 1;
-        }
+        let read = conn.conn.recv(pkt_buf, info).map_err(QuicheRecvFailed)?;
+        self.continue_write = true;
 
         trace!("{}: processed {} bytes", info.to, read);
 
@@ -295,6 +290,15 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
                 );
         }
 
+        if !conn.setup_early_data && conn.conn.is_in_early_data() {
+            conn.setup_early_data = true;
+            conn.max_datagram_size = conn.conn.max_send_udp_payload_size();
+        }
+        if !conn.setup_established && conn.conn.is_established() {
+            conn.setup_established = true;
+            conn.max_datagram_size = conn.conn.max_send_udp_payload_size();
+        }
+
         if new_connection {
             Ok(RecvResult::NewConnection(cid))
         } else {
@@ -302,129 +306,116 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
         }
     }
 
-    /// Generate a batch of outgoing QUIC packets to be sent on the UDP socket to the same destination.
-    /// Returns `Err::Done` if no more packets are available.
-    /// This function returns the same destination subsequently to optimize batched sending.
-    /// Returns following values:
-    ///  1. the total of bytes added to the `out`
-    ///  2. the segment size (the least one might be smaller)
-    ///  3. the send info
-    pub fn send_packets_out(&mut self, out: &mut [u8]) -> Result<SendOk> {
+    /// Generate all outgoing QUIC packets to be sent on the UDP socket.
+    /// continue_write is set if write < max_datagram_size or  total_write >= max_send_burst
+    pub fn send_all<F>(&mut self, out: &mut [u8], mut send_to: F) where F: FnMut(&mut [u8], &SendInfo, usize) -> std::io::Result<()> {
         if let Some(server) = self.server.as_mut() {
             // send queued packets first
-            while let Some((buf, send_info)) = server.packet_queue.pop_packet() {
+            while let Some((mut buf, send_info)) = server.packet_queue.pop_packet() {
                 let len = buf.len();
-                (&mut out[..len]).copy_from_slice(&buf);
+                send_to(
+                    buf.as_mut_slice(),
+                    &send_info,
+                    len,
+                ).unwrap();
                 server.packet_queue.push_buffer(buf);
-                return Ok(SendOk {
-                    total: len,
-                    segment_size: len,
-                    send_info,
-                    client_id: None,
-                });
             }
         }
 
-        let ok = 'conn: loop {
-            if !self.has_pending_sends() {
-                return Err(Error::Done);
+        // Generate outgoing QUIC packets for all active connections and send
+        // them on the UDP socket, until quiche reports that there are no more
+        // packets to be sent.
+        self.continue_write = false;
+        for (_, client)in &mut self.conns {
+            // Reduce max_send_burst by 25% if loss is increasing more than 0.1%.
+            let loss_rate =
+                client.conn.stats().lost as f64 / client.conn.stats().sent as f64;
+            if loss_rate > client.loss_rate + 0.001 {
+                client.max_send_burst = client.max_send_burst / 4 * 3;
+                // Minimum bound of 10xMSS.
+                client.max_send_burst =
+                    client.max_send_burst.max(client.max_datagram_size * 10);
+                client.loss_rate = loss_rate;
             }
-            let conn = match self.conns.get_mut(self.current_send_conn) {
-                None => {
-                    self.current_send_conn += 1;
-                    if self.current_send_conn >= self.conns.capacity() {
-                        self.current_send_conn = 0;
-                    }
-                    self.current_dst_addr = None;
-                    continue;
-                }
-                Some(v) => v,
-            };
-            let quic_conn = &mut conn.conn;
-            let max_datagram_size = quic_conn.max_send_udp_payload_size();
-            debug_assert!(out.len() >= max_datagram_size);
-            let mut total_write = 0;
-            let mut dst_info: Option<quiche::SendInfo> = None;
 
+            let max_datagram_size = client.conn.max_send_udp_payload_size();
             let quantum = if self.config.ignore_quantum {
-                MAX_UDP_PAYLOAD
+                client.max_send_burst
             } else {
-                // using conn.send_quantum might perform worse
-                quic_conn.send_quantum()
+                client.conn.send_quantum().min(client.max_send_burst)
             };
-            let max_send_burst = quantum.min(out.len()) / max_datagram_size * max_datagram_size;
-            assert!(out.len() >= max_send_burst);
+            let max_send_burst = quantum /
+                    max_datagram_size *
+                    max_datagram_size;
+            let mut total_write = 0;
+            let mut dst_info = None;
 
-            'packet: loop {
-                debug_assert!(max_send_burst-total_write>=max_datagram_size);
-                let (write, mut send_info) = match quic_conn.send_on_path(&mut out[total_write..max_send_burst], None, self.current_dst_addr) {
+            while total_write < max_send_burst {
+                let (write, send_info) = match client
+                    .conn
+                    .send(&mut out[total_write..max_send_burst])
+                {
                     Ok(v) => v,
+
                     Err(quiche::Error::Done) => {
-                        match self.current_dst_addr {
-                            None => {
-                                trace!("{}: done writing", quic_conn.trace_id());
-                                self.current_send_conn += 1; // next conn
-                                if conn.pending_send {
-                                    conn.pending_send = false;
-                                    self.pending_send_conns -= 1;
-                                }
-                                debug_assert_eq!(total_write, 0);
-                                continue 'conn;
-                            }
-                            Some(dst) => {
-                                trace!("{}: None -> {}: done writing", quic_conn.trace_id(), dst);
-                                self.current_dst_addr = None; // next path
-                                if total_write == 0 {
-                                    continue 'packet;
-                                } else {
-                                    break 'packet;
-                                }
-                            }
-                        }
-                    }
+                        trace!("{} done writing", client.conn.trace_id());
+                        break;
+                    },
+
                     Err(e) => {
-                        error!("{}: None -> {:?}: send failed: {:?}", quic_conn.trace_id(), self.current_dst_addr, e);
-                        quic_conn.close(false, 0x1, b"fail").ok();
-                        self.current_send_conn += 1; // next conn
-                        continue 'conn;
-                    }
+                        error!("{} send failed: {:?}", client.conn.trace_id(), e);
+
+                        client.conn.close(false, 0x1, b"fail").ok();
+                        break;
+                    },
                 };
-                debug_assert_ne!(write, 0);
-                match self.current_dst_addr {
-                    None => {
-                        self.current_dst_addr = Some(send_info.to);
-                    }
-                    Some(dst_addr) => {
-                        debug_assert_eq!(dst_addr, send_info.to);
-                    }
-                }
+
                 total_write += write;
+
                 // Use the first packet time to send, not the last.
-                if dst_info.is_none() {
-                    if self.config.ignore_pacing {
-                        send_info.at = INSTANT_ZERO;
-                    }
-                    dst_info = Some(send_info)
-                }
+                let _ = dst_info.get_or_insert(send_info);
 
                 if write < max_datagram_size {
-                    break 'packet;
+                    self.continue_write = true;
+                    break;
+                }
+            }
+
+            if total_write == 0 || dst_info.is_none() {
+                continue;
+            }
+
+            if let Err(e) = send_to(
+                &mut out[..total_write],
+                {
+                    let i = dst_info.as_mut().unwrap();
+                    if self.config.ignore_pacing {
+                        i.at = INSTANT_ZERO;
+                    }
+                    i
+                },
+                max_datagram_size
+            ) {
+                if e.kind() == std::io::ErrorKind::WouldBlock {
+                    trace!("send() would block");
+                    self.continue_write = true;
+                    break;
                 }
 
-                if total_write >= max_send_burst {
-                    break 'packet;
-                }
-            };
-            debug_assert_ne!(total_write, 0);
-            debug_assert_ne!(dst_info, None);
-            break SendOk {
-                total: total_write,
-                segment_size: max_datagram_size,
-                send_info: dst_info.unwrap(),
-                client_id: Some(conn.client_id),
-            };
-        };
-        Ok(ok)
+                panic!("send_to() failed: {e:?}");
+            }
+
+            trace!(
+                "{} written {total_write} bytes with {dst_info:?}",
+                client.conn.trace_id()
+            );
+
+            if total_write >= max_send_burst {
+                trace!("{} pause writing", client.conn.trace_id(),);
+                self.continue_write = true;
+                break;
+            }
+        }
     }
 
     fn queue_version_negotiation(&mut self, hdr: &Header, recv_info: &RecvInfo) -> Result<()> {
@@ -455,7 +446,7 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
 
         let mut buf = server.packet_queue.pop_buffer();
 
-        let new_token = mint_token(&hdr, &recv_info.from);
+        let new_token = mint_token(hdr, &recv_info.from);
 
         let len = quiche::retry(
             &hdr.scid,
@@ -493,10 +484,6 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
                 self.conn_ids.remove(&id_owned);
             }
 
-            if c.pending_send {
-                self.pending_send_conns -= 1;
-            }
-
             if let Some(on_close) = on_close {
                 on_close(c, &mut self.app_data)
             }
@@ -520,22 +507,15 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
     pub fn on_timeout(&mut self) {
         trace!("on_timeout");
         self.conns.iter_mut().for_each(|(_, c)| {
-            c.pending_send = true;
             c.conn.on_timeout()
         });
-        self.pending_send_conns = self.conns.len();
+        self.continue_write = true;
     }
 
     /// Returns true if `send_packets_out()` might still return packets.
     /// All packets must be sent before waiting for the next timeout.
     pub fn has_pending_sends(&self) -> bool {
-        if let Some(server) = &self.server {
-            if server.packet_queue.packet_count() != 0 {
-                return true;
-            }
-        }
-
-        self.pending_send_conns != 0
+        self.continue_write
     }
 
     pub fn conn(&self, cid: ClientId) -> Option<&Conn<TConnAppData>> {
@@ -544,31 +524,23 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
 
     /// This will mark the connection as `pending_send` because the caller might trigger sending
     /// packets, for example, by calling `stream_send`.
-    fn _conn_mut<'a>(conns: &'a mut ConnMap<TConnAppData>, pending_send_conns: &mut usize, cid: ClientId) -> Option<&'a mut Conn<TConnAppData>> {
-        let Some(c) = conns.get_mut(cid) else { return None };
-        Self::_mark_pending_send(c, pending_send_conns);
+    fn _conn_mut<'a>(conns: &'a mut ConnMap<TConnAppData>, cid: ClientId, continue_write: &mut bool) -> Option<&'a mut Conn<TConnAppData>> {
+        let c = conns.get_mut(cid)?;
+        *continue_write = true;
         Some(c)
-    }
-
-    fn _mark_pending_send(c: &mut Conn<TConnAppData>, pending_send_conns: &mut usize) {
-        if !c.pending_send {
-            c.pending_send = true;
-            *pending_send_conns += 1;
-        }
     }
 
     /// This will mark the connection as `pending_send` because the caller might trigger sending
     /// packets, for example, by calling `stream_send`.
     pub fn conn_mut(&mut self, cid: ClientId) -> Option<&mut Conn<TConnAppData>> {
-        Self::_conn_mut(&mut self.conns, &mut self.pending_send_conns, cid)
+        Self::_conn_mut(&mut self.conns, cid, &mut self.continue_write)
     }
 
     /// This will mark the connections as `pending_send` because the caller might trigger sending
     /// packets, for example, by calling `stream_send`.
     pub fn conn2_mut(&mut self, cid1: ClientId, cid2: ClientId) -> Option<(&mut Conn<TConnAppData>, &mut Conn<TConnAppData>)> {
-        let Some((c1, c2)) = self.conns.get2_mut(cid1, cid2) else { return None };
-        Self::_mark_pending_send(c1, &mut self.pending_send_conns);
-        Self::_mark_pending_send(c2, &mut self.pending_send_conns);
+        let (c1, c2) = self.conns.get2_mut(cid1, cid2)?;
+        self.continue_write = true;
         Some((c1, c2))
     }
 
@@ -577,7 +549,7 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
     /// Also returns the endpoints app data.
     pub fn conn_with_app_data_mut(&mut self, cid: ClientId) -> (Option<&mut Conn<TConnAppData>>, &mut TAppData) {
         (
-            Self::_conn_mut(&mut self.conns, &mut self.pending_send_conns, cid),
+            Self::_conn_mut(&mut self.conns, cid, &mut self.continue_write),
             &mut self.app_data
         )
     }
@@ -585,10 +557,10 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
     /// This will mark the connections as `pending_send` because the caller might trigger sending
     /// packets, for example, by calling `stream_send`.
     /// Also returns the endpoints app data.
+    #[allow(clippy::type_complexity)]
     pub fn conn2_with_app_data_mut(&mut self, cid1: ClientId, cid2: ClientId) -> (Option<(&mut Conn<TConnAppData>, &mut Conn<TConnAppData>)>, &mut TAppData) {
         let Some((c1, c2)) = self.conns.get2_mut(cid1, cid2) else { return (None, &mut self.app_data) };
-        Self::_mark_pending_send(c1, &mut self.pending_send_conns);
-        Self::_mark_pending_send(c2, &mut self.pending_send_conns);
+        self.continue_write = true;
         (Some((c1, c2)), &mut self.app_data)
     }
 
@@ -637,13 +609,35 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
             let id_owned = id.clone().into_owned();
             self.conn_ids.remove(&id_owned);
         }
-
-        if conn.pending_send {
-            self.pending_send_conns -= 1;
-        }
     }
 
     pub fn take_app_data(self) -> TAppData {
         self.app_data
+    }
+
+    /// calls connection stream_send
+    pub fn stream_send(&mut self, cid: ClientId, stream_id: u64, buf: &[u8], fin: bool) -> Result<usize> {
+        self.conn_mut(cid)
+            .ok_or(Error::UnknownConnID)?
+            .conn.stream_send(stream_id, buf, fin)
+            .map_err(Into::into)
+    }
+
+    /// calls connection stream_recv
+    pub fn stream_recv(&mut self, cid: ClientId, stream_id: u64, buf: &mut [u8]) -> Result<(usize, bool)> {
+        self.conn_mut(cid)
+            .ok_or(Error::UnknownConnID)?
+            .conn.stream_recv(stream_id, buf)
+            .map_err(Into::into)
+    }
+
+    /// Remove all connections and pending packets
+    pub fn reset(&mut self) {
+        if let Some(server) = &mut self.server {
+            server.reset();
+        }
+        self.conn_ids.clear();
+        self.conns.clear();
+        self.continue_write = false;
     }
 }

@@ -11,6 +11,9 @@ use quiche::{Config, RecvInfo, SendInfo, PROTOCOL_VERSION};
 use std::net::SocketAddr;
 use std::sync::OnceLock;
 
+const MAX_SEND_PAYLOAD: usize = 1500 - 44;
+const COPY_BUF_SIZE: usize = 1 << 16;
+
 /// generate private and public key pair for testing
 pub fn key_pair() -> &'static (PKey<Private>, X509) {
     static KEY_PAIR: OnceLock<(PKey<Private>, X509)> = OnceLock::new();
@@ -63,6 +66,7 @@ pub fn default_server_config(key: &PKey<Private>, cert: &'static X509) -> Server
             c.set_application_protos(&[b"proto1"]).unwrap();
             c.set_initial_max_streams_bidi(1);
             c.set_initial_max_stream_data_uni(1);
+            c.set_max_send_udp_payload_size(MAX_SEND_PAYLOAD);
             c.set_initial_max_data(10_000);
             c.set_initial_max_stream_data_uni(10_000);
             c.set_initial_max_stream_data_bidi_local(10_000);
@@ -88,6 +92,7 @@ pub fn default_client_config(cert: &'static X509) -> Config {
     c.set_application_protos(&[b"proto1"]).unwrap();
     c.set_initial_max_streams_bidi(1);
     c.set_initial_max_stream_data_uni(1);
+    c.set_max_send_udp_payload_size(MAX_SEND_PAYLOAD);
     c.set_initial_max_data(10_000);
     c.set_initial_max_stream_data_uni(10_000);
     c.set_initial_max_stream_data_bidi_local(10_000);
@@ -103,6 +108,14 @@ pub struct Pipe {
     pub cert: &'static X509,
     pub client: Endpoint<(), ()>,
     pub server: Endpoint<(), ()>,
+    /// buffer that is reused for copying packets between endpoints
+    copy_buf: [u8; COPY_BUF_SIZE],
+}
+
+impl Default for Pipe {
+    fn default() -> Self {
+        Pipe::new()
+    }
 }
 
 impl Pipe {
@@ -123,6 +136,7 @@ impl Pipe {
             cert,
             client: Endpoint::new(None, EndpointConfig::default(), ()),
             server: Endpoint::new(Some(server_config), EndpointConfig::default(), ()),
+            copy_buf: [0u8; COPY_BUF_SIZE],
         }
     }
 
@@ -143,13 +157,13 @@ impl Pipe {
     pub fn connect_with(&mut self, peer_addr: Option<SocketAddr>, client_config: Option<&mut Config>) -> ClientId {
         let peer_addr = peer_addr.unwrap_or("127.0.0.1:9000".parse().unwrap());
         let mut default_client_config = default_client_config(self.cert);
-        let mut client_config = client_config.unwrap_or(&mut default_client_config);
+        let client_config = client_config.unwrap_or(&mut default_client_config);
 
         self.client.connect(
             None,
             "127.0.0.1:8000".parse().unwrap(),
             peer_addr,
-            &mut client_config,
+            client_config,
             (),
             None,
             None,
@@ -158,24 +172,19 @@ impl Pipe {
 
     /// transfer as many packets from sender to receiver as currently available.
     /// return `Done` if nothing was sent.
-    pub fn transfer(sender: &mut Endpoint<(), ()>, receiver: &mut Endpoint<(), ()>) -> Result<()> {
+    pub fn transfer(sender: &mut Endpoint<(), ()>, receiver: &mut Endpoint<(), ()>, buf: &mut [u8; COPY_BUF_SIZE]) -> Result<()> {
         let mut sent_something = false;
-        let mut buf = [0u8; 1 << 16];
-        loop {
-            let ok = match sender.send_packets_out(&mut buf) {
-                Ok(v) => v,
-                Err(Error::Done) => {
-                    return match sent_something {
-                        true => Ok(()),
-                        false => Err(Error::Done),
-                    }
-                }
-                Err(e) => panic!("{:?}", e)
-            };
-            for r in receiver.recv_pkts(&mut buf[..ok.total], ok.segment_size, to_recv_info(ok.send_info)) {
+        sender.send_all(buf, |buf, send_info, segment_size| {
+            sent_something = true;
+            for r in receiver.recv_pkts(buf, segment_size, to_recv_info(*send_info)) {
                 r.unwrap();
             }
-            sent_something = true;
+            Ok(())
+        });
+        if sent_something {
+            Ok(())
+        } else {
+            Err(Error::Done)
         }
     }
 
@@ -184,12 +193,12 @@ impl Pipe {
         let mut client_done = false;
         let mut server_done = false;
         while !client_done || !server_done {
-            match Self::transfer(&mut self.client, &mut self.server) {
+            match Self::transfer(&mut self.client, &mut self.server, &mut self.copy_buf) {
                 Ok(()) => client_done = false,
                 Err(Error::Done) => client_done = true,
                 Err(e) => panic!("{:?}", e)
             }
-            match Self::transfer(&mut self.server, &mut self.client) {
+            match Self::transfer(&mut self.server, &mut self.client, &mut self.copy_buf) {
                 Ok(()) => server_done = false,
                 Err(Error::Done) => server_done = true,
                 Err(e) => panic!("{:?}", e)
@@ -204,13 +213,18 @@ impl Pipe {
             self.client.conn_iter().all(|(_, c)| c.conn.is_established())
                 && self.server.conn_iter().all(|(_, c)| c.conn.is_established())
         ) {
-            Self::transfer(&mut self.client, &mut self.server)?;
-            Self::transfer(&mut self.server, &mut self.client)?;
+            Self::transfer(&mut self.client, &mut self.server, &mut self.copy_buf)?;
+            Self::transfer(&mut self.server, &mut self.client, &mut self.copy_buf)?;
         }
         Ok(())
     }
 
     pub fn take(self) -> (Endpoint, Endpoint) {
         (self.client, self.server)
+    }
+
+    pub fn reset(&mut self) {
+        self.client.reset();
+        self.server.reset();
     }
 }
