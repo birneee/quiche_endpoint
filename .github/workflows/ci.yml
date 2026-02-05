@@ -23,7 +23,7 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@v13
       - uses: DeterminateSystems/flake-checker-action@v12
       - name: Cargo Clippy
-        run: nix develop -c cargo clippy
+        run: nix develop -c cargo clippy -- -D warnings
       - name: Cargo Test
         run: nix develop -c cargo test
       - name: Nix Build
