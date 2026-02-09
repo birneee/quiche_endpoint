@@ -62,4 +62,16 @@ impl <T> ServerConfig<T> {
     pub(crate) fn reset(&mut self) {
         self.packet_queue.clear();
     }
+
+    pub fn new(accept_func: AcceptFunc<T>) -> Self {
+        Self {
+            retry: None,
+            out: [0; MAX_UDP_PAYLOAD],
+            setup_conn_keylog: None,
+            on_accept: accept_func,
+            client_config: quiche::Config::new(PROTOCOL_VERSION).unwrap(),
+            conn_id_seed: hmac::Key::generate(hmac::HMAC_SHA256, &SystemRandom::new()).unwrap(),
+            packet_queue: PacketQueue::new(),
+        }
+    }
 }
