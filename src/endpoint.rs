@@ -640,4 +640,11 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
         self.conns.clear();
         self.continue_write = false;
     }
+
+    /// Return mut collection of connections and mut app_data
+    pub fn mut_conns_and_app_data(&mut self) -> (&mut ConnMap<TConnAppData>, &mut TAppData) {
+        self.continue_write = true;
+        (&mut self.conns, &mut self.app_data)
+    }
+
 }
