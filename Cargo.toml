@@ -4,19 +4,37 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
+quiche_24 = ["dep:quiche_24"]
+quiche_25 = ["dep:quiche_25"]
+quiche_26 = ["dep:quiche_26"]
+
 # Enable quiche's fuzzing mode.
-fuzzing = ["quiche/fuzzing"]
+fuzzing = [
+    "quiche_24?/fuzzing",
+    "quiche_25?/fuzzing",
+    "quiche_26?/fuzzing",
+]
 
 # Enable qlog support.
-qlog = ["quiche/qlog"]
+qlog = [
+    "quiche_24?/qlog", 
+    "quiche_25?/qlog", 
+    "quiche_26?/qlog",
+]
 
 # Use boring crate.
-boringssl-boring-crate = ["quiche/boringssl-boring-crate"]
+boringssl-boring-crate = [
+    "quiche_24?/boringssl-boring-crate", 
+    "quiche_25?/boringssl-boring-crate", 
+    "quiche_26?/boringssl-boring-crate",
+]
 
-default = ["qlog", "quiche/boringssl-boring-crate"]
+default = ["quiche_26", "qlog", "boringssl-boring-crate"]
 
 [dependencies]
-quiche = "0.24"
+quiche_24 = { package = "quiche", version = "0.24", optional = true }
+quiche_25 = { package = "quiche", version = "0.25", optional = true }
+quiche_26 = { package = "quiche", version = "0.26", optional = true }
 log = "0.4"
 ring = "0.17"
 slab = "0.4"

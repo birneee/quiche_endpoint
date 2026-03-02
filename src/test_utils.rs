@@ -7,7 +7,7 @@ use boring::ssl::{SslContextBuilder, SslMethod};
 use boring::x509::extension::SubjectAlternativeName;
 use boring::x509::store::X509StoreBuilder;
 use boring::x509::{X509NameBuilder, X509};
-use quiche::{Config, RecvInfo, SendInfo, PROTOCOL_VERSION};
+use crate::quiche::{Config, RecvInfo, SendInfo, PROTOCOL_VERSION};
 use std::net::SocketAddr;
 use std::sync::OnceLock;
 

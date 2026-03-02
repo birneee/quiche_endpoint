@@ -1,4 +1,4 @@
-use quiche::SendInfo;
+use crate::quiche::SendInfo;
 use std::collections::VecDeque;
 
 const MAX_BUFFER_SIZE: usize = 2048;

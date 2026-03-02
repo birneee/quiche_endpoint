@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use quiche::{Header, SendInfo, Type};
+    use crate::quiche::{Header, SendInfo, Type};
     use crate::endpoint::RecvResult;
     use crate::test_utils::{to_recv_info, Pipe};
 

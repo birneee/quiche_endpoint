@@ -1,5 +1,5 @@
 use crate::ClientId;
-use quiche::Connection;
+use crate::quiche::Connection;
 use std::fmt;
 use std::fmt::Formatter;
 

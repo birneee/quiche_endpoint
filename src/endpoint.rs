@@ -3,7 +3,7 @@ use crate::error::Error;
 use crate::error::Error::{InvalidHeader, QuicheRecvFailed};
 use crate::{generate_cid_and_reset_token, handle_path_events, server_config, setup_qlog, ClientId, ClientIdMap, Conn, ConnMap, Result, INSTANT_ZERO, MAX_UDP_PAYLOAD};
 use log::{debug, error, trace, warn};
-use quiche::{ConnectionId, Header, RecvInfo, SendInfo};
+use crate::quiche::{self, ConnectionId, Header, RecvInfo, SendInfo};
 use ring::rand::{SecureRandom, SystemRandom};
 use smallvec::SmallVec;
 use std::net::SocketAddr;

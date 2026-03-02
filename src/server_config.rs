@@ -1,6 +1,6 @@
 use crate::packet_queue::PacketQueue;
 use crate::MAX_UDP_PAYLOAD;
-use quiche::{Connection, ConnectionId, Header, PROTOCOL_VERSION};
+use crate::quiche::{self, Connection, ConnectionId, Header, PROTOCOL_VERSION};
 use ring::hmac;
 use ring::rand::SystemRandom;
 use std::net::SocketAddr;
