@@ -157,7 +157,7 @@ pub fn generate_cid_and_reset_token<T: SecureRandom>(
 
 /// Enable qlog if QLOGDIR environment variable is set.
 #[cfg(feature = "qlog")]
-pub fn setup_qlog(conn: &mut Connection, role: &str, scid: &ConnectionId) {
+pub fn default_setup_qlog(conn: &mut Connection, role: &str, scid: &ConnectionId) {
     if let Some(dir) = std::env::var_os("QLOGDIR") {
         let id = format!("{:?}", scid);
         let writer = make_qlog_writer(&dir, role, &id);

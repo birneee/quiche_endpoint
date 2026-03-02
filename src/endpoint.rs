@@ -1,7 +1,7 @@
 use crate::endpoint_config::EndpointConfig;
 use crate::error::Error;
 use crate::error::Error::{InvalidHeader, QuicheRecvFailed};
-use crate::{generate_cid_and_reset_token, handle_path_events, server_config, setup_qlog, ClientId, ClientIdMap, Conn, ConnMap, Result, INSTANT_ZERO, MAX_UDP_PAYLOAD};
+use crate::{generate_cid_and_reset_token, handle_path_events, server_config, ClientId, ClientIdMap, Conn, ConnMap, Result, INSTANT_ZERO, MAX_UDP_PAYLOAD};
 use log::{debug, error, trace, warn};
 use crate::quiche::{self, ConnectionId, Header, RecvInfo, SendInfo};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -89,7 +89,7 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
 
         // Only bother with qlog if the user specified it.
         #[cfg(feature = "qlog")]
-        setup_qlog(&mut conn, "client", &scid);
+        (self.config.setup_qlog)(&mut conn, "client", &scid);
 
         if let Some(session_file) = session_file && let Ok(session) = std::fs::read(session_file) {
             conn.set_session(&session).ok();
@@ -220,7 +220,7 @@ impl<TConnAppData, TAppData> Endpoint<TConnAppData, TAppData> {
 
                 // Only bother with qlog if the user specified it.
                 #[cfg(feature = "qlog")]
-                setup_qlog(&mut conn, "server", &scid);
+                (self.config.setup_qlog)(&mut conn, "server", &scid);
 
                 let app_data = (server.on_accept)(&conn);
 
