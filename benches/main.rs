@@ -4,6 +4,7 @@ use pprof::criterion::Output;
 use pprof::criterion::PProfProfiler;
 use quiche_endpoint::test_utils::Pipe;
 use quiche_endpoint::Error;
+use quiche_endpoint::quiche;
 use std::time::{Duration, Instant};
 
 criterion_group!(
