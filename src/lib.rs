@@ -8,15 +8,7 @@ mod benches {
     use pprof as _;
 }
 
-// Alias the chosen version for internal use and reexport
-#[cfg(feature = "quiche_24")]
-pub use quiche_24 as quiche;
-#[cfg(feature = "quiche_25")]
-pub use quiche_25 as quiche;
-#[cfg(feature = "quiche_26")]
-pub use quiche_26 as quiche;
-#[cfg(feature = "quiche_28")]
-pub use quiche_28 as quiche;
+pub use quiche;
 
 mod endpoint;
 mod endpoint_config;
